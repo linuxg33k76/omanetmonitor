@@ -68,6 +68,20 @@ omarchy bar set omanetmonitor allowedCountries "US,CA"
 omarchy bar set omanetmonitor refreshIntervalSec 60 --json
 ```
 
+## Exporting to CSV
+
+The **Save to** field at the bottom of the panel holds a destination path,
+pre-filled with `~/omanetmonitor-flagged-<timestamp>.csv` the first time you
+open the panel — edit it to save wherever you want (an absolute path, a
+`~/...` path, or a bare filename, which is resolved relative to your home
+directory). Click **Export CSV** (or press Enter in the field) to write the
+currently displayed flagged-connections list — IP address, country code,
+country name, port, and connection count — to that file. There's no native
+"Save As" file-browser dialog (the Omarchy shell avoids those inside its
+layer-shell popups); typing the path is the mechanism for choosing where it
+goes. A status line under the button confirms the write or reports why it
+failed (e.g. a directory that doesn't exist).
+
 ## Limitations
 
 - TCP only (UDP has no persistent "established" state to enumerate the same

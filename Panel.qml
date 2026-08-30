@@ -159,10 +159,78 @@ Panel {
     repeat: true
   }
 
+  // ------------------------------------------------------------------ export
+
+  // exportPathField.text carries the destination directly — no separate
+  // property mirroring it, since (unlike allowedCountries) it never needs
+  // to round-trip through shell.json settings. It stays empty until the
+  // user opens the panel for the first time (or edits it), so a default is
+  // only ever suggested, never forced — once set, it's remembered for the
+  // rest of the session instead of resetting on every reopen, since the
+  // whole point is letting the user pick a destination.
+  property string exportStatus: ""
+  property bool exportFailed: false
+
+  function ensureExportPathDefault() {
+    if (exportPathField.text !== "") return
+    var home = Quickshell.env("HOME") || ""
+    exportPathField.text = home + "/" + Model.defaultExportFilename()
+  }
+
+  // "~", "~/foo", an absolute path, or a bare filename (resolved against
+  // $HOME, since a bar panel has no meaningful working directory) — no
+  // native file-save dialog is used here (see README), so this expansion is
+  // what lets a typed path actually reach an arbitrary destination.
+  function expandExportPath(raw) {
+    var p = String(raw || "").trim()
+    if (p === "") return ""
+    var home = Quickshell.env("HOME") || ""
+    if (p === "~") return home
+    if (p.indexOf("~/") === 0) return home + p.substring(1)
+    if (p.indexOf("/") === 0) return p
+    return home + "/" + p
+  }
+
+  function exportCsv() {
+    var target = root.expandExportPath(exportPathField.text)
+    if (target === "") {
+      root.exportFailed = true
+      root.exportStatus = "Enter a file path first"
+      exportStatusClearTimer.restart()
+      return
+    }
+    exportFileView.path = target
+    exportFileView.setText(Model.buildFlaggedCsv(root.flaggedEntries))
+  }
+
+  FileView {
+    id: exportFileView
+    printErrors: false
+    atomicWrites: true
+    onSaved: {
+      root.exportFailed = false
+      root.exportStatus = "Saved " + root.flaggedEntries.length + " row" + (root.flaggedEntries.length === 1 ? "" : "s") + " to " + exportFileView.path
+      exportStatusClearTimer.restart()
+    }
+    onSaveFailed: function(error) {
+      root.exportFailed = true
+      root.exportStatus = "Export failed: " + error
+      exportStatusClearTimer.restart()
+    }
+  }
+
+  Timer {
+    id: exportStatusClearTimer
+    interval: 6000
+    repeat: false
+    onTriggered: root.exportStatus = ""
+  }
+
   // ------------------------------------------------------------- open / close
 
   function open() {
     root.resetSettingsDraft()
+    root.ensureExportPathDefault()
     root.controller.show()
     Qt.callLater(function() {
       if (root.opened) root.primeFocus()
@@ -205,12 +273,12 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(480))
-    contentHeight: panel.fittedContentHeight(Style.space(440))
+    contentHeight: panel.fittedContentHeight(Style.space(500))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: countriesField.activeFocus
+      blocked: countriesField.activeFocus || exportPathField.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
     }
@@ -467,6 +535,61 @@ Panel {
             id: rowHover
           }
         }
+      }
+
+      // ---------------------------------------------------------- export
+
+      PanelSeparator {
+        Layout.fillWidth: true
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+
+        Label {
+          text: "Save to:"
+          color: Qt.darker(root.contentForeground, 1.4)
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        TextField {
+          id: exportPathField
+          Layout.fillWidth: true
+          placeholderText: "~/omanetmonitor-flagged.csv"
+          foreground: root.contentForeground
+          accent: Color.accent
+          font.family: root.contentFontFamily
+          // No `text:` binding — see the countriesField comment above for
+          // why this stays imperative-only.
+          Keys.onEscapePressed: root.close()
+          Keys.onReturnPressed: root.exportCsv()
+        }
+
+        Button {
+          text: "Export CSV"
+          tooltipText: "Save the flagged-connections list as CSV"
+          bordered: true
+          foreground: root.contentForeground
+          accent: Color.accent
+          fontFamily: root.contentFontFamily
+          fontSize: Style.font.bodySmall
+          horizontalPadding: Style.space(10)
+          verticalPadding: Style.space(4)
+          onClicked: root.exportCsv()
+        }
+      }
+
+      Label {
+        visible: root.exportStatus !== ""
+        text: root.exportStatus
+        textFormat: Text.PlainText
+        color: root.exportFailed ? Color.urgent : Qt.darker(root.contentForeground, 1.5)
+        font.family: root.contentFontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Label.Wrap
+        Layout.fillWidth: true
       }
     }
   }

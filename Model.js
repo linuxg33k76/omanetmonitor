@@ -53,3 +53,41 @@ function formatRelativeTime(epochSeconds) {
   var deltaHour = Math.round(deltaMin / 60)
   return deltaHour + "h ago"
 }
+
+// CSV field quoting per RFC 4180: wrap in quotes and double any embedded
+// quotes whenever the value contains a comma, quote, or newline (country
+// names routinely contain commas, e.g. "Korea, Republic of").
+function csvEscape(value) {
+  var s = value === undefined || value === null ? "" : String(value)
+  if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'
+  return s
+}
+
+// Builds CSV text (header + one row per entry) for the flagged-connections
+// list, in the same order the panel displays it.
+function buildFlaggedCsv(entries) {
+  var lines = ["IP Address,Country Code,Country Name,Port,Connections"]
+  var list = Array.isArray(entries) ? entries : []
+  for (var i = 0; i < list.length; i++) {
+    var e = list[i]
+    lines.push([
+      csvEscape(e.ip),
+      csvEscape(e.countryCode),
+      csvEscape(e.countryName),
+      csvEscape(e.port),
+      csvEscape(e.count)
+    ].join(","))
+  }
+  return lines.join("\n") + "\n"
+}
+
+// "omanetmonitor-flagged-20260830-143022.csv" — a filename that sorts and
+// reads naturally, and never collides with a previous export in the same
+// second.
+function defaultExportFilename() {
+  var d = new Date()
+  function pad(n) { return n < 10 ? "0" + n : String(n) }
+  var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
+    + "-" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds())
+  return "omanetmonitor-flagged-" + stamp + ".csv"
+}
