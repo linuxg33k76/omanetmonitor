@@ -3,6 +3,19 @@
 Bar plugin that watches your machine's established outbound TCP connections
 and flags any whose remote IP geolocates outside a country/region you allow.
 
+## Installation
+
+Requires [Omarchy](https://omarchy.org/). Install and enable the plugin, then
+add it to the bar:
+
+```bash
+omarchy plugin add https://github.com/linuxg33k76/omanetmonitor.git --enable --yes
+omarchy bar put omanetmonitor --section right
+```
+
+Plugins run as unsandboxed code inside `omarchy-shell` — review the source
+before enabling anything, including this repo.
+
 ## How it works
 
 Every `refreshIntervalSec` seconds (default 30), `bin/omanetmonitor-scan`:
