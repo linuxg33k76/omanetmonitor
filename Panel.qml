@@ -557,7 +557,7 @@ Panel {
         TextField {
           id: exportPathField
           Layout.fillWidth: true
-          placeholderText: "~/omanetmonitor-flagged.csv"
+          placeholderText: "~/omanetmonitor-flagged-export.csv"
           foreground: root.contentForeground
           accent: Color.accent
           font.family: root.contentFontFamily

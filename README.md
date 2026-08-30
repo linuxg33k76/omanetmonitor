@@ -71,7 +71,7 @@ omarchy bar set omanetmonitor refreshIntervalSec 60 --json
 ## Exporting to CSV
 
 The **Save to** field at the bottom of the panel holds a destination path,
-pre-filled with `~/omanetmonitor-flagged-<timestamp>.csv` the first time you
+pre-filled with `~/omanetmonitor-flagged-export-<timestamp>.csv` the first time you
 open the panel — edit it to save wherever you want (an absolute path, a
 `~/...` path, or a bare filename, which is resolved relative to your home
 directory). Click **Export CSV** (or press Enter in the field) to write the

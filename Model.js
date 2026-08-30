@@ -81,13 +81,13 @@ function buildFlaggedCsv(entries) {
   return lines.join("\n") + "\n"
 }
 
-// "omanetmonitor-flagged-20260830-143022.csv" — a filename that sorts and
-// reads naturally, and never collides with a previous export in the same
-// second.
+// "omanetmonitor-flagged-export-20260830-143022.csv" — date/time appended
+// to the base name right before the extension, so it sorts and reads
+// naturally and never collides with a previous export in the same second.
 function defaultExportFilename() {
   var d = new Date()
   function pad(n) { return n < 10 ? "0" + n : String(n) }
   var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
     + "-" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds())
-  return "omanetmonitor-flagged-" + stamp + ".csv"
+  return "omanetmonitor-flagged-export-" + stamp + ".csv"
 }
