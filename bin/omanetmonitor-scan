@@ -25,7 +25,11 @@ CACHE_TTL = 7 * 24 * 3600
 LOOKUP_TIMEOUT = 2.5
 MAX_NEW_LOOKUPS = 8
 MAX_WORKERS = 5
-TOP_N = 10
+# Safety bound on the JSON payload, not a "top N" display cap — the panel
+# scrolls through everything returned here. A real host won't have anywhere
+# near this many distinct flagged (ip, port) pairs established at once; this
+# just keeps a pathological case from producing an unbounded response.
+MAX_FLAGGED_ENTRIES = 500
 
 
 def cache_path():
@@ -164,7 +168,7 @@ def main():
         "totalConnections": sum(counts.values()),
         "totalUniquePeers": len(counts),
         "totalFlagged": len(flagged_entries),
-        "top": flagged_entries[:TOP_N],
+        "flagged": flagged_entries[:MAX_FLAGGED_ENTRIES],
     }
     print(json.dumps(result))
 

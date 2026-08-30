@@ -36,7 +36,7 @@ function parseScanOutput(text) {
   if (trimmed === "") return null
   try {
     var data = JSON.parse(trimmed)
-    if (!data || typeof data !== "object" || !Array.isArray(data.top)) return null
+    if (!data || typeof data !== "object" || !Array.isArray(data.flagged)) return null
     return data
   } catch (error) {
     return null

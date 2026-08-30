@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "OmaNetMonitor",
-    "description": "Bar icon that turns urgent-colored when an outbound connection is talking to an IP outside your allowed countries. Click it to see the top 10 flagged IPs, their country, and port.",
+    "description": "Bar icon that turns urgent-colored when an outbound connection is talking to an IP outside your allowed countries. Click it to see every flagged IP, its country, and port, in a scrollable list.",
     "category": "Network",
     "aliases": ["netmonitor", "geoip", "outbound"],
     "allowMultiple": false,

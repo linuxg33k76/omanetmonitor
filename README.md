@@ -48,12 +48,12 @@ Every `refreshIntervalSec` seconds (default 30), `bin/omanetmonitor-scan`:
    addresses your machine is already talking to, not your own IP or any
    other data.
 3. Flags every connection whose country code isn't in your allow-list, and
-   prints the top 10 (by connection count) as JSON.
+   prints all of them (sorted by connection count) as JSON.
 
 The bar icon is a globe normally, and turns into an urgent-colored warning
 glyph with a count badge when anything is flagged. Click it to see the
-IP address, country, and port for each flagged connection, and to edit the
-allow-list or scan interval inline.
+IP address, country, and port for every flagged connection in a scrollable
+list, and to edit the allow-list or scan interval inline.
 
 ## Settings
 
@@ -80,3 +80,5 @@ omarchy bar set omanetmonitor refreshIntervalSec 60 --json
   accurate for every IP block (VPN exit nodes, cloud provider ranges, and
   anycast IPs in particular can resolve to a different country than the
   physical server).
+- The scrollable list is capped at 500 flagged entries per scan as a safety
+  bound, not a practical limit — a real host won't come close.

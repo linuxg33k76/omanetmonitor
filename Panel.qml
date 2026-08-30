@@ -10,7 +10,8 @@ import "Model.js" as Model
 // OmaNetMonitor popup: periodically scans established outbound TCP
 // connections (via the plugin-local bin/omanetmonitor-scan helper), flags
 // any whose remote IP geolocates outside the user's allowed countries, and
-// lists the top 10 by connection count with IP, country, and port.
+// lists every flagged connection (IP, country, port) in a scrollable list,
+// sorted by connection count.
 Panel {
   id: root
   moduleName: "omanetmonitor"
@@ -34,34 +35,37 @@ Panel {
     return (v >= 10 && v <= 600) ? v : 30
   }
 
-  // Inline settings editor. countriesField.text is set imperatively (never
-  // QML-bound to a settings-derived property), and pendingIntervalSec only
-  // ever changes from NumberField's user-driven `modified` signal — so
-  // neither can fight a settings reload the way a live two-way binding
-  // would (a bound TextField.text + an onTextChanged writeback is a
-  // feedback loop: the very first programmatic sync trips onTextChanged,
-  // which stomps the binding with a stale value before the real settings
-  // arrive).
+  // Inline settings editor. Dirty state is two plain flags, each toggled by
+  // exactly one kind of event (a real user edit, or an explicit reset/save) —
+  // never a property whose binding both reads and gets written to as part of
+  // resolving the same dependency chain. That combination (countriesDirty as
+  // `computed from countriesField.text`, with a change handler on one of its
+  // own dependencies turning around and writing countriesField.text) is what
+  // an earlier version of this file had, and Qt correctly flagged it as a
+  // binding loop — it converged in practice, but relying on evaluation-order
+  // side effects like that is fragile.
   //
-  // Dirty is "does the field disagree with the last value WE synced from
-  // disk" rather than "does it disagree with disk right now" — settings
-  // land asynchronously (injectPanel runs after the Panel is fully
-  // constructed), so on first load allowedCountriesRaw briefly reads the
-  // manifest fallback before the real value arrives. Comparing straight
-  // against allowedCountriesRaw would treat that first real update as a
-  // conflicting user edit and permanently refuse to apply it.
-  property string lastSyncedCountries: root.allowedCountriesRaw
-  property int lastSyncedIntervalSec: root.refreshIntervalSec
+  // syncingCountriesField distinguishes a programmatic text assignment from
+  // a real keystroke: TextField has no separate "user edited" signal, so
+  // onTextChanged fires for both; without the guard, our own sync writes
+  // would mark the field dirty against itself.
+  property bool syncingCountriesField: false
+  property bool countriesDirty: false
   property int pendingIntervalSec: root.refreshIntervalSec
-  readonly property bool countriesDirty: countriesField.text !== root.lastSyncedCountries
-  readonly property bool intervalDirty: root.pendingIntervalSec !== root.lastSyncedIntervalSec
+  property bool intervalDirty: false
   readonly property bool settingsDirty: root.countriesDirty || root.intervalDirty
 
+  function setCountriesFieldText(value) {
+    root.syncingCountriesField = true
+    countriesField.text = value
+    root.syncingCountriesField = false
+  }
+
   function resetSettingsDraft() {
-    countriesField.text = root.allowedCountriesRaw
-    root.lastSyncedCountries = root.allowedCountriesRaw
+    root.setCountriesFieldText(root.allowedCountriesRaw)
+    root.countriesDirty = false
     root.pendingIntervalSec = root.refreshIntervalSec
-    root.lastSyncedIntervalSec = root.refreshIntervalSec
+    root.intervalDirty = false
   }
 
   function saveSettings() {
@@ -71,9 +75,9 @@ Panel {
     saveCountriesProcess.running = true
     saveIntervalProcess.command = ["omarchy", "bar", "set", "omanetmonitor", "refreshIntervalSec", String(root.pendingIntervalSec), "--json"]
     saveIntervalProcess.running = true
-    countriesField.text = csv
-    root.lastSyncedCountries = csv
-    root.lastSyncedIntervalSec = root.pendingIntervalSec
+    root.setCountriesFieldText(csv)
+    root.countriesDirty = false
+    root.intervalDirty = false
     root.runScanWith(csv)
   }
 
@@ -81,12 +85,10 @@ Panel {
   Process { id: saveIntervalProcess }
 
   onAllowedCountriesRawChanged: {
-    if (!root.countriesDirty) countriesField.text = root.allowedCountriesRaw
-    root.lastSyncedCountries = root.allowedCountriesRaw
+    if (!root.countriesDirty) root.setCountriesFieldText(root.allowedCountriesRaw)
   }
   onRefreshIntervalSecChanged: {
     if (!root.intervalDirty) root.pendingIntervalSec = root.refreshIntervalSec
-    root.lastSyncedIntervalSec = root.refreshIntervalSec
     scanTimer.restart()
   }
 
@@ -133,7 +135,7 @@ Panel {
       }
       root.scanFailed = false
       root.scanErrorText = ""
-      root.flaggedEntries = data.top || []
+      root.flaggedEntries = data.flagged || []
       root.flaggedCount = data.totalFlagged || 0
       root.totalConnections = data.totalConnections || 0
       root.totalUniquePeers = data.totalUniquePeers || 0
@@ -298,7 +300,10 @@ Panel {
           font.family: root.contentFontFamily
           // No `text:` binding on purpose — see the settingsDirty comment
           // above. Initial/external sync happens imperatively via
-          // resetSettingsDraft() and onAllowedCountriesRawChanged.
+          // resetSettingsDraft() and onAllowedCountriesRawChanged, both of
+          // which go through setCountriesFieldText() and so don't trip
+          // this handler.
+          onTextChanged: if (!root.syncingCountriesField) root.countriesDirty = true
           Keys.onEscapePressed: root.close()
           Keys.onReturnPressed: root.saveSettings()
         }
@@ -313,7 +318,7 @@ Panel {
           foreground: root.contentForeground
           accent: Color.accent
           fontFamily: root.contentFontFamily
-          onModified: function(v) { root.pendingIntervalSec = v }
+          onModified: function(v) { root.pendingIntervalSec = v; root.intervalDirty = true }
         }
 
         Label {
@@ -355,7 +360,7 @@ Panel {
 
       Label {
         text: root.flaggedCount > 0
-          ? ("Top " + Math.min(10, root.flaggedEntries.length) + " outside your allowed region")
+          ? (root.flaggedEntries.length + " outside your allowed region")
           : "No outbound connections outside your allowed region"
         color: root.contentForeground
         font.family: root.contentFontFamily
@@ -406,6 +411,12 @@ Panel {
         ScrollBar.vertical: ScrollBar {
           policy: ScrollBar.AsNeeded
           implicitWidth: Style.space(6)
+          contentItem: Rectangle {
+            implicitWidth: Style.space(6)
+            implicitHeight: Style.space(6)
+            radius: width / 2
+            color: Util.alpha(root.contentForeground, 0.45)
+          }
         }
 
         delegate: Rectangle {
