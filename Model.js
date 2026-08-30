@@ -1,0 +1,55 @@
+// Shared helpers for OmaNetMonitor: locating the plugin-local scan script and
+// interpreting its JSON output.
+
+// QUrl (as Qt.resolvedUrl hands to QML) or plain string -> local filesystem
+// path. Only a leading "file://" is stripped; percent-escapes decode.
+function localFilePath(value) {
+  var text = String(value || "")
+  if (text.indexOf("file://") === 0) text = text.substring(7)
+  try {
+    return decodeURIComponent(text)
+  } catch (error) {
+    return text
+  }
+}
+
+// Normalizes a comma-separated country-code string: uppercase, trimmed,
+// de-duplicated, empty entries dropped. Falls back to ["US"] when nothing
+// usable is left.
+function normalizeCountryList(raw) {
+  var seen = {}
+  var out = []
+  var parts = String(raw || "").split(",")
+  for (var i = 0; i < parts.length; i++) {
+    var code = parts[i].trim().toUpperCase()
+    if (code === "" || seen[code]) continue
+    seen[code] = true
+    out.push(code)
+  }
+  return out.length > 0 ? out : ["US"]
+}
+
+// Parses the scan script's stdout. Returns null on anything unparsable so
+// callers can distinguish "bad output" from "clean scan, nothing flagged".
+function parseScanOutput(text) {
+  var trimmed = String(text || "").trim()
+  if (trimmed === "") return null
+  try {
+    var data = JSON.parse(trimmed)
+    if (!data || typeof data !== "object" || !Array.isArray(data.top)) return null
+    return data
+  } catch (error) {
+    return null
+  }
+}
+
+function formatRelativeTime(epochSeconds) {
+  if (!epochSeconds) return "never"
+  var deltaSec = Math.max(0, Math.round(Date.now() / 1000 - epochSeconds))
+  if (deltaSec < 5) return "just now"
+  if (deltaSec < 60) return deltaSec + "s ago"
+  var deltaMin = Math.round(deltaSec / 60)
+  if (deltaMin < 60) return deltaMin + "m ago"
+  var deltaHour = Math.round(deltaMin / 60)
+  return deltaHour + "h ago"
+}

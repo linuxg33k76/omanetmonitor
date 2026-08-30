@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+# Scans currently established outbound TCP connections (via `ss`), geolocates
+# each remote IP's country (cached on disk, MaxMind-free HTTPS lookup for
+# whatever isn't cached yet), and prints a JSON summary of the connections
+# whose country is outside the caller-supplied allow-list.
+#
+# argv[1]: comma-separated ISO 3166-1 alpha-2 country codes to treat as "home"
+#          (not flagged). Defaults to "US" if omitted/empty.
+#
+# Everything here is read-only (ss, a cache file under $XDG_CACHE_HOME, and
+# outbound HTTPS GETs to ipwho.is for IPs not already cached) and bounded:
+# at most MAX_NEW_LOOKUPS fresh geolocation calls per invocation, each capped
+# at LOOKUP_TIMEOUT seconds, so a slow/unreachable lookup can't hang a scan.
+
+import ipaddress
+import json
+import os
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from urllib.request import urlopen
+
+CACHE_TTL = 7 * 24 * 3600
+LOOKUP_TIMEOUT = 2.5
+MAX_NEW_LOOKUPS = 8
+MAX_WORKERS = 5
+TOP_N = 10
+
+
+def cache_path():
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    d = os.path.join(base, "omarchy", "omanetmonitor")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "geoip-cache.json")
+
+
+def load_cache(path):
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_cache(path, cache):
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def parse_peers():
+    try:
+        proc = subprocess.run(
+            ["ss", "-Htn", "state", "established"],
+            capture_output=True, text=True, timeout=5, check=False
+        )
+        out = proc.stdout
+    except Exception:
+        return {}
+
+    counts = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        peer = parts[-1]
+        if peer.startswith("["):
+            end = peer.find("]")
+            if end == -1:
+                continue
+            ip = peer[1:end]
+            rest = peer[end + 2:]
+        else:
+            idx = peer.rfind(":")
+            if idx == -1:
+                continue
+            ip = peer[:idx]
+            rest = peer[idx + 1:]
+        ip = ip.split("%")[0]
+        try:
+            port = int(rest)
+        except ValueError:
+            continue
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_reserved or addr.is_unspecified):
+            continue
+        key = (ip, port)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def lookup_country(ip):
+    try:
+        with urlopen("https://ipwho.is/%s" % ip, timeout=LOOKUP_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        if data.get("success") is False:
+            return None
+        code = (data.get("country_code") or "").upper()
+        name = data.get("country") or ""
+        if not code:
+            return None
+        return {"code": code, "name": name, "ts": time.time()}
+    except Exception:
+        return None
+
+
+def main():
+    allowed_raw = sys.argv[1] if len(sys.argv) > 1 else "US"
+    allowed = set(c.strip().upper() for c in allowed_raw.split(",") if c.strip())
+    if not allowed:
+        allowed = {"US"}
+
+    path = cache_path()
+    cache = load_cache(path)
+
+    counts = parse_peers()
+    ips = sorted(set(ip for ip, _port in counts.keys()))
+
+    now = time.time()
+    stale = [ip for ip in ips if ip not in cache or (now - cache[ip].get("ts", 0)) > CACHE_TTL]
+    stale = stale[:MAX_NEW_LOOKUPS]
+
+    if stale:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            results = list(zip(stale, ex.map(lookup_country, stale)))
+        changed = False
+        for ip, res in results:
+            if res:
+                cache[ip] = res
+                changed = True
+        if changed:
+            save_cache(path, cache)
+
+    entries = []
+    for (ip, port), count in counts.items():
+        info = cache.get(ip)
+        code = info["code"] if info else ""
+        name = info["name"] if info else "Unknown"
+        flagged = code not in allowed
+        entries.append({
+            "ip": ip,
+            "port": port,
+            "countryCode": code,
+            "countryName": name,
+            "count": count,
+            "flagged": flagged,
+        })
+
+    flagged_entries = [e for e in entries if e["flagged"]]
+    flagged_entries.sort(key=lambda e: (-e["count"], e["ip"]))
+
+    result = {
+        "generatedAt": int(now),
+        "totalConnections": sum(counts.values()),
+        "totalUniquePeers": len(counts),
+        "totalFlagged": len(flagged_entries),
+        "top": flagged_entries[:TOP_N],
+    }
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "omanetmonitor",
+  "name": "OmaNetMonitor",
+  "version": "1.0.0",
+  "author": "linuxg33k76",
+  "license": "MIT",
+  "description": "Watches outbound TCP connections and flags any whose remote IP geolocates outside your allowed countries/regions.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaNetMonitor",
+    "description": "Bar icon that turns urgent-colored when an outbound connection is talking to an IP outside your allowed countries. Click it to see the top 10 flagged IPs, their country, and port.",
+    "category": "Network",
+    "aliases": ["netmonitor", "geoip", "outbound"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "allowedCountries": "US",
+      "refreshIntervalSec": 30
+    },
+    "schema": [
+      {
+        "key": "allowedCountries",
+        "type": "string",
+        "label": "Allowed countries",
+        "description": "Comma-separated ISO 3166-1 alpha-2 country codes that should NOT be flagged (e.g. \"US\" or \"US,CA,MX\").",
+        "defaultValue": "US"
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Scan interval (seconds)",
+        "min": 10,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 30
+      }
+    ]
+  }
+}
