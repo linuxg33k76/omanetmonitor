@@ -168,13 +168,18 @@ Panel {
   // only ever suggested, never forced — once set, it's remembered for the
   // rest of the session instead of resetting on every reopen, since the
   // whole point is letting the user pick a destination.
+  //
+  // The field itself never carries a timestamp — exportCsv() stamps the
+  // path fresh on every click (see Model.withExportTimestamp), so the
+  // filename reflects when the export actually happened, not whenever the
+  // panel happened to be opened or last edited.
   property string exportStatus: ""
   property bool exportFailed: false
 
   function ensureExportPathDefault() {
     if (exportPathField.text !== "") return
     var home = Quickshell.env("HOME") || ""
-    exportPathField.text = home + "/" + Model.defaultExportFilename()
+    exportPathField.text = home + "/omanetmonitor-flagged-export.csv"
   }
 
   // "~", "~/foo", an absolute path, or a bare filename (resolved against
@@ -192,14 +197,14 @@ Panel {
   }
 
   function exportCsv() {
-    var target = root.expandExportPath(exportPathField.text)
-    if (target === "") {
+    var base = root.expandExportPath(exportPathField.text)
+    if (base === "") {
       root.exportFailed = true
       root.exportStatus = "Enter a file path first"
       exportStatusClearTimer.restart()
       return
     }
-    exportFileView.path = target
+    exportFileView.path = Model.withExportTimestamp(base)
     exportFileView.setText(Model.buildFlaggedCsv(root.flaggedEntries))
   }
 

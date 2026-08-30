@@ -71,16 +71,23 @@ omarchy bar set omanetmonitor refreshIntervalSec 60 --json
 ## Exporting to CSV
 
 The **Save to** field at the bottom of the panel holds a destination path,
-pre-filled with `~/omanetmonitor-flagged-export-<timestamp>.csv` the first time you
-open the panel — edit it to save wherever you want (an absolute path, a
-`~/...` path, or a bare filename, which is resolved relative to your home
+pre-filled with `~/omanetmonitor-flagged-export.csv` the first time you open
+the panel — edit it to save wherever you want (an absolute path, a `~/...`
+path, or a bare filename, which is resolved relative to your home
 directory). Click **Export CSV** (or press Enter in the field) to write the
 currently displayed flagged-connections list — IP address, country code,
-country name, port, and connection count — to that file. There's no native
-"Save As" file-browser dialog (the Omarchy shell avoids those inside its
-layer-shell popups); typing the path is the mechanism for choosing where it
-goes. A status line under the button confirms the write or reports why it
-failed (e.g. a directory that doesn't exist).
+country name, port, and connection count — to that file.
+
+The current date and time is inserted right before the `.csv` extension at
+the moment you click Export (e.g. `omanetmonitor-flagged-export-20260830-143022.csv`)
+— computed fresh on each export, not baked into the field's default text —
+so repeated exports never overwrite each other and the timestamp reflects
+when the file was actually written. There's no native "Save As"
+file-browser dialog (the Omarchy shell avoids those inside its layer-shell
+popups); typing the path is the mechanism for choosing where it goes. A
+status line under the button confirms the write (showing the exact
+timestamped filename used) or reports why it failed (e.g. a directory that
+doesn't exist).
 
 ## Limitations
 

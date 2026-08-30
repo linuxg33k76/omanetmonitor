@@ -81,13 +81,22 @@ function buildFlaggedCsv(entries) {
   return lines.join("\n") + "\n"
 }
 
-// "omanetmonitor-flagged-export-20260830-143022.csv" — date/time appended
-// to the base name right before the extension, so it sorts and reads
-// naturally and never collides with a previous export in the same second.
-function defaultExportFilename() {
+function timestampSuffix() {
   var d = new Date()
   function pad(n) { return n < 10 ? "0" + n : String(n) }
-  var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
+  return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
     + "-" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds())
-  return "omanetmonitor-flagged-export-" + stamp + ".csv"
+}
+
+// Inserts "-<current timestamp>" right before the extension (or appends it,
+// if the path has none) — e.g. "~/x.csv" -> "~/x-20260830-143022.csv".
+// Computed fresh on every call, so the stamp reflects when the file is
+// actually written rather than whenever the default path was suggested.
+function withExportTimestamp(path) {
+  var p = String(path || "")
+  var stamp = timestampSuffix()
+  var dot = p.lastIndexOf(".")
+  var slash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"))
+  if (dot > slash) return p.substring(0, dot) + "-" + stamp + p.substring(dot)
+  return p + "-" + stamp
 }
