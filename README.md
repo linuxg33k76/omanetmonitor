@@ -16,6 +16,23 @@ omarchy bar put omanetmonitor --section right
 Plugins run as unsandboxed code inside `omarchy-shell` — review the source
 before enabling anything, including this repo.
 
+## Uninstall
+
+```bash
+omarchy plugin remove omanetmonitor --yes
+```
+
+This disables the plugin and deletes its git checkout from
+`~/.config/omarchy/plugins/omanetmonitor/` (installed this way, it's
+git-managed, so it's removed outright rather than backed up — the source
+stays on GitHub if you want it again). It leaves behind
+`~/.cache/omarchy/omanetmonitor/geoip-cache.json`; delete that too if you
+want no trace left:
+
+```bash
+rm -rf ~/.cache/omarchy/omanetmonitor
+```
+
 ## How it works
 
 Every `refreshIntervalSec` seconds (default 30), `bin/omanetmonitor-scan`:
