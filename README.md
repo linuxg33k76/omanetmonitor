@@ -4,7 +4,10 @@ Bar plugin that watches your machine's established outbound TCP connections
 and flags any whose remote IP geolocates outside a country/region you allow.
 
 
-![alt text](image.png)
+![alt text](image1.png)
+
+
+![alt text](image2.png)
 
 
 ## Installation
