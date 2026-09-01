@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omanetmonitor",
   "name": "OmaNetMonitor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "linuxg33k76",
   "license": "MIT",
   "description": "Watches outbound TCP connections and flags any whose remote IP geolocates outside your allowed countries/regions.",
