@@ -4,10 +4,10 @@ Bar plugin that watches your machine's established outbound TCP connections
 and flags any whose remote IP geolocates outside a country/region you allow.
 
 
-![alt text](image1.png)
+![OmaNetMonitor panel open, showing one flagged connection outside the allowed region](preview.png)
 
 
-![alt text](image2.png)
+![OmaNetMonitor panel with the flagged-connections list and CSV export field](image2.png)
 
 
 ## Installation
@@ -22,6 +22,12 @@ omarchy bar put omanetmonitor --section right
 
 Plugins run as unsandboxed code inside `omarchy-shell` — review the source
 before enabling anything, including this repo.
+
+No dependencies beyond a stock Omarchy install: the scan helper needs
+`python3` (pulled in transitively via `omarchy`'s `uwsm` dependency) and
+`ss` from `iproute2` (part of Arch's `base` group) — both are already on
+every Omarchy system. No other packages, services, or root access are
+required.
 
 ## Uninstall
 
