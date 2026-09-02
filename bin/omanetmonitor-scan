@@ -25,6 +25,7 @@
 
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -35,10 +36,19 @@ import ssl
 import stat
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPSConnection
 from urllib.parse import urljoin, urlsplit
+
+
+class ScanUnavailable(Exception):
+    """Raised whenever `ss` didn't complete cleanly with a verified zero
+    exit and fully drained output. This is a security-monitoring widget, so
+    a scan that couldn't actually run must never be presented as a clean
+    "nothing flagged" result — main() turns this into a failed process
+    exit instead, which the panel already surfaces as a scan error."""
 
 CACHE_TTL = 7 * 24 * 3600
 LOOKUP_TIMEOUT = 2.5
@@ -91,14 +101,56 @@ def _is_public_address(addr):
                 or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
 
 
+def _sanitize_cache(cache):
+    """load_cache_fd only guarantees the top-level JSON was an object —
+    each value is still on-disk data that could be corrupted or (via the
+    dir-fd/ownership checks failing open somewhere) attacker-controlled.
+    Keep only entries whose key is a real IP literal and whose value is a
+    correctly shaped {code, name, ts} record; drop anything else rather
+    than let a single malformed record (e.g. a null value) crash every
+    subsequent scan via an unchecked .get()."""
+    out = {}
+    for key, value in cache.items():
+        try:
+            ipaddress.ip_address(key)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        code = _sanitize_country_code(value.get("code"))
+        if not code:
+            continue
+        ts = value.get("ts")
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts) or ts < 0:
+            continue
+        out[key] = {"code": code, "name": _sanitize_country_name(value.get("name")), "ts": float(ts)}
+    return out
+
+
 # ------------------------------------------------------------- pinned fetch
 
-def _resolve_public_ip(hostname):
-    try:
-        infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    except OSError:
+def _resolve_public_ip(hostname, timeout):
+    """Resolves `hostname` to a public IP, bounded by `timeout` seconds.
+    socket.getaddrinfo() has no native timeout — it's a blocking libc call,
+    not a socket operation — so this runs it on a daemon thread and stops
+    waiting after `timeout`. A stuck resolver thread is left to die on its
+    own (daemon=True means it can't block process exit either); the point
+    is that the caller's logical wait, and therefore the whole scan, stays
+    bounded even when the underlying OS call doesn't return in time."""
+    box = {}
+
+    def _resolve():
+        try:
+            box["infos"] = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+        except OSError:
+            box["infos"] = []
+
+    t = threading.Thread(target=_resolve, daemon=True)
+    t.start()
+    t.join(max(timeout, 0))
+    if t.is_alive():
         return None
-    for info in infos:
+    for info in box.get("infos", []):
         candidate = info[4][0].split("%")[0]
         try:
             addr = ipaddress.ip_address(candidate)
@@ -139,8 +191,11 @@ def _fetch_json_pinned(url, deadline):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
-        ip = _resolve_public_ip(parsed.hostname)
+        ip = _resolve_public_ip(parsed.hostname, remaining)
         if ip is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return None
         port = parsed.port or 443
         path = parsed.path or "/"
@@ -317,19 +372,23 @@ def save_cache_fd(dir_fd, cache):
 # ------------------------------------------------------------------- ss scan
 
 def parse_peers():
+    """Returns established-peer counts from `ss`, or raises ScanUnavailable
+    for anything short of a fully drained, verified-zero-exit run — never a
+    partial/empty result silently presented as "no connections"."""
     try:
         proc = subprocess.Popen(
             ["ss", "-Htn", "state", "established"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             start_new_session=True,  # own process group, so a timeout can kill it and any children cleanly
         )
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise ScanUnavailable("failed to start ss") from exc
 
     deadline = time.monotonic() + SS_TIMEOUT
     chunks = []
     total = 0
     overflow = False
+    timed_out = False
     stdout_fd = proc.stdout.fileno()
     os.set_blocking(stdout_fd, False)
     sel = selectors.DefaultSelector()
@@ -338,6 +397,7 @@ def parse_peers():
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                timed_out = True
                 break
             for _key, _mask in sel.select(timeout=min(remaining, SS_POLL_INTERVAL)):
                 try:
@@ -374,10 +434,14 @@ def parse_peers():
         except Exception:
             pass
 
-    out = b"".join(chunks)
     if overflow:
-        out = out[:MAX_SS_OUTPUT_BYTES]
-    out = out.decode("utf-8", "replace")
+        raise ScanUnavailable("ss output exceeded %d bytes" % MAX_SS_OUTPUT_BYTES)
+    if timed_out:
+        raise ScanUnavailable("ss did not complete within %.1fs" % SS_TIMEOUT)
+    if proc.returncode != 0:
+        raise ScanUnavailable("ss exited with code %r" % proc.returncode)
+
+    out = b"".join(chunks).decode("utf-8", "replace")
 
     counts = {}
     for line in out.splitlines():
@@ -426,13 +490,19 @@ def main():
         allowed = {"US"}
 
     try:
+        counts = parse_peers()
+    except ScanUnavailable as exc:
+        sys.stderr.write("omanetmonitor-scan: %s\n" % exc)
+        sys.exit(1)
+
+    try:
         cache_dir_fd = open_cache_dir()
     except Exception:
         cache_dir_fd = None
 
     cache = load_cache_fd(cache_dir_fd) if cache_dir_fd is not None else {}
+    cache = _sanitize_cache(cache)
 
-    counts = parse_peers()
     ips = sorted(set(ip for ip, _port in counts.keys()))
 
     now = time.time()
