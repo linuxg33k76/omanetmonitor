@@ -370,12 +370,22 @@ Panel {
             text: root.scanFailed
               ? ("Scan error: " + root.scanErrorText)
               : (root.totalConnections + " outbound connection" + (root.totalConnections === 1 ? "" : "s") + " · "
-                  + root.flaggedCount + " outside " + root.allowedCountries.join(", ")
-                  + " · updated " + Model.formatRelativeTime(root.lastScanAt))
+                  + root.flaggedCount + " outside " + root.allowedCountries.join(", "))
             textFormat: Text.PlainText
             color: root.scanFailed ? Color.urgent : Qt.darker(root.contentForeground, 1.5)
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.bodySmall
+            Layout.fillWidth: true
+            elide: Label.ElideRight
+          }
+
+          Label {
+            visible: !root.scanFailed
+            text: "updated " + Model.formatRelativeTime(root.lastScanAt)
+            textFormat: Text.PlainText
+            color: Qt.darker(root.contentForeground, 1.8)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
             Layout.fillWidth: true
             elide: Label.ElideRight
           }
