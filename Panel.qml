@@ -117,14 +117,36 @@ Panel {
     scanProcess.running = true
   }
 
+  // Quickshell's Process/StdioCollector don't expose a way to cap bytes
+  // while streaming or to reach into the child's process group from QML —
+  // that streaming-bounded enforcement lives in the scan script itself,
+  // which is the thing actually reading `ss` and the network response. At
+  // this layer the two things available are: a hard wall-clock deadline
+  // (the watchdog below, which stops the process via `running = false` if
+  // it hasn't exited in time) and rejecting the collected output outright
+  // if it's larger than a sane scan result should ever be, before it's
+  // parsed at all.
+  readonly property int scanWatchdogMs: 20000
+  readonly property int maxScanOutputLen: 256 * 1024
+
   Process {
     id: scanProcess
     stdout: StdioCollector { id: scanStdout; waitForEnd: true }
+    onRunningChanged: {
+      if (scanProcess.running) scanWatchdog.restart()
+      else scanWatchdog.stop()
+    }
     onExited: function(exitCode) {
+      scanWatchdog.stop()
       root.scanning = false
       if (exitCode !== 0) {
         root.scanFailed = true
         root.scanErrorText = "Scan exited with code " + exitCode
+        return
+      }
+      if (scanStdout.text.length > root.maxScanOutputLen) {
+        root.scanFailed = true
+        root.scanErrorText = "Scan output too large"
         return
       }
       var data = Model.parseScanOutput(scanStdout.text)
@@ -140,6 +162,19 @@ Panel {
       root.totalConnections = data.totalConnections || 0
       root.totalUniquePeers = data.totalUniquePeers || 0
       root.lastScanAt = data.generatedAt || Math.round(Date.now() / 1000)
+    }
+  }
+
+  Timer {
+    id: scanWatchdog
+    interval: root.scanWatchdogMs
+    repeat: false
+    onTriggered: {
+      if (!scanProcess.running) return
+      root.scanning = false
+      root.scanFailed = true
+      root.scanErrorText = "Scan timed out"
+      scanProcess.running = false
     }
   }
 

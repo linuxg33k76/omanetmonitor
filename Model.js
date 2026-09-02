@@ -13,33 +13,92 @@ function localFilePath(value) {
   }
 }
 
+var COUNTRY_CODE_RE = /^[A-Z]{2}$/
+var MAX_ALLOWED_CODES = 50
+var MAX_ALLOWED_RAW_LEN = 2000
+
 // Normalizes a comma-separated country-code string: uppercase, trimmed,
-// de-duplicated, empty entries dropped. Falls back to ["US"] when nothing
+// de-duplicated, and validated as exactly two letters (ISO 3166-1
+// alpha-2) — a malformed entry is dropped rather than passed through, since
+// this string is later handed to the scan script via argv. Bounded on both
+// input length and output cardinality. Falls back to ["US"] when nothing
 // usable is left.
 function normalizeCountryList(raw) {
   var seen = {}
   var out = []
-  var parts = String(raw || "").split(",")
-  for (var i = 0; i < parts.length; i++) {
+  var parts = String(raw || "").substring(0, MAX_ALLOWED_RAW_LEN).split(",")
+  for (var i = 0; i < parts.length && out.length < MAX_ALLOWED_CODES; i++) {
     var code = parts[i].trim().toUpperCase()
-    if (code === "" || seen[code]) continue
+    if (!COUNTRY_CODE_RE.test(code) || seen[code]) continue
     seen[code] = true
     out.push(code)
   }
   return out.length > 0 ? out : ["US"]
 }
 
+var MAX_SCAN_OUTPUT_LEN = 256 * 1024
+var MAX_FLAGGED_ENTRIES = 500
+var MAX_IP_LEN = 45 // longest possible IPv6 literal
+var MAX_COUNTRY_NAME_LEN = 100
+var MAX_COUNT = 1000000
+
+// Clamps to a finite non-negative integer, optionally capped at `max`.
+function sanitizeNonNegativeInt(value, max) {
+  var n = Math.floor(Number(value))
+  if (!isFinite(n) || n < 0) n = 0
+  return max !== undefined ? Math.min(n, max) : n
+}
+
+// Re-validates one flagged-connection entry: the scan script already
+// bounds/types these, but the panel treats its stdout as untrusted input
+// crossing a process boundary and re-checks independently rather than
+// trusting the producer. Returns null for anything malformed.
+function sanitizeFlaggedEntry(e) {
+  if (!e || typeof e !== "object") return null
+  var ip = String(e.ip !== undefined && e.ip !== null ? e.ip : "")
+  if (ip.length === 0 || ip.length > MAX_IP_LEN) return null
+  var port = sanitizeNonNegativeInt(e.port, 65535)
+  if (port < 1 || port > 65535) return null
+  var code = String(e.countryCode !== undefined && e.countryCode !== null ? e.countryCode : "").toUpperCase()
+  if (code !== "" && !COUNTRY_CODE_RE.test(code)) code = ""
+  var name = String(e.countryName !== undefined && e.countryName !== null ? e.countryName : "").substring(0, MAX_COUNTRY_NAME_LEN)
+  return {
+    ip: ip,
+    port: port,
+    countryCode: code,
+    countryName: name,
+    count: sanitizeNonNegativeInt(e.count, MAX_COUNT),
+    flagged: e.flagged === true
+  }
+}
+
 // Parses the scan script's stdout. Returns null on anything unparsable so
 // callers can distinguish "bad output" from "clean scan, nothing flagged".
+// Every field is bounded/typed here rather than trusted as-is, and the
+// flagged list is capped independently of whatever totalFlagged claims.
 function parseScanOutput(text) {
   var trimmed = String(text || "").trim()
-  if (trimmed === "") return null
+  if (trimmed === "" || trimmed.length > MAX_SCAN_OUTPUT_LEN) return null
+  var data
   try {
-    var data = JSON.parse(trimmed)
-    if (!data || typeof data !== "object" || !Array.isArray(data.flagged)) return null
-    return data
+    data = JSON.parse(trimmed)
   } catch (error) {
     return null
+  }
+  if (!data || typeof data !== "object" || !Array.isArray(data.flagged)) return null
+
+  var flagged = []
+  for (var i = 0; i < data.flagged.length && flagged.length < MAX_FLAGGED_ENTRIES; i++) {
+    var entry = sanitizeFlaggedEntry(data.flagged[i])
+    if (entry) flagged.push(entry)
+  }
+
+  return {
+    generatedAt: sanitizeNonNegativeInt(data.generatedAt),
+    totalConnections: sanitizeNonNegativeInt(data.totalConnections, MAX_COUNT),
+    totalUniquePeers: sanitizeNonNegativeInt(data.totalUniquePeers, MAX_COUNT),
+    totalFlagged: flagged.length,
+    flagged: flagged
   }
 }
 

@@ -7,21 +7,38 @@
 # argv[1]: comma-separated ISO 3166-1 alpha-2 country codes to treat as "home"
 #          (not flagged). Defaults to "US" if omitted/empty.
 #
-# Everything here is read-only (ss, a cache file under $XDG_CACHE_HOME, and
-# outbound HTTPS GETs to ipwho.is for IPs not already cached) and bounded:
-# at most MAX_NEW_LOOKUPS fresh geolocation calls per invocation, each capped
-# at LOOKUP_TIMEOUT seconds, so a slow/unreachable lookup can't hang a scan.
+# Threat model this file defends against: `ss`'s stdout, the on-disk cache,
+# and the GeoIP HTTPS response are each read into memory with a streaming
+# byte ceiling and an absolute wall-clock deadline (not just a per-syscall
+# timeout), so a pathological/hostile producer can't grow memory unbounded
+# or hang a scan. The GeoIP fetch resolves and connects to a pinned IP (SNI
+# and cert hostname checks still run against the real hostname) so a second,
+# different DNS answer at connect time can't steer the request somewhere the
+# redirect check never saw. The disk cache is reached via a component-wise
+# walk of open, fstat-verified directory descriptors (owner is us or root,
+# never group/other-writable, never a symlink) and written through that
+# held directory fd as a randomly named 0600 temp file, fsynced, then
+# renamed into place — so there's no path-based TOCTOU window. Every field
+# that survives all of that is still bounded/typed before being handed to
+# the QML side as JSON, since it records which remote hosts this machine
+# has been talking to.
 
 import ipaddress
 import json
 import os
+import re
+import secrets
+import selectors
+import signal
 import socket
+import ssl
+import stat
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, build_opener
+from http.client import HTTPSConnection
+from urllib.parse import urljoin, urlsplit
 
 CACHE_TTL = 7 * 24 * 3600
 LOOKUP_TIMEOUT = 2.5
@@ -33,101 +50,334 @@ MAX_WORKERS = 5
 # just keeps a pathological case from producing an unbounded response.
 MAX_FLAGGED_ENTRIES = 500
 
-# Byte ceilings for the three untrusted-size inputs this script reads: a
-# geoip-lookup HTTPS response, `ss`'s stdout, and the on-disk cache file.
-# All are normally tiny; these just stop a pathological/hostile response
-# (or a corrupted cache file) from being read into memory unbounded.
+# Byte ceilings for the untrusted-size inputs this script reads: a
+# geoip-lookup HTTPS response, `ss`'s stdout, the on-disk cache file, and
+# the assembled result payload. All are normally tiny; these stop a
+# pathological/hostile producer from being read into memory unbounded.
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_SS_OUTPUT_BYTES = 1024 * 1024
 MAX_CACHE_BYTES = 2 * 1024 * 1024
+MAX_RESULT_BYTES = 256 * 1024
 MAX_REDIRECTS = 5
 
+SS_TIMEOUT = 5.0
+SS_POLL_INTERVAL = 0.2
 
-def _is_public_host(hostname):
+MAX_COUNTRY_NAME_LEN = 100
+MAX_ALLOWED_CODES = 50
+MAX_CACHE_ENTRIES = 2000
+COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
+
+# Directory/file components in the cache path are only trusted if owned by
+# us or by root (e.g. the ancestor system directories above $HOME).
+_TRUSTED_OWNERS = {0, os.getuid()}
+
+
+# --------------------------------------------------------------- sanitizers
+
+def _sanitize_country_code(code):
+    code = (code or "").strip().upper()
+    return code if COUNTRY_CODE_RE.match(code) else ""
+
+
+def _sanitize_country_name(name):
+    if not isinstance(name, str):
+        return ""
+    return name[:MAX_COUNTRY_NAME_LEN]
+
+
+def _is_public_address(addr):
+    return not (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
+
+
+# ------------------------------------------------------------- pinned fetch
+
+def _resolve_public_ip(hostname):
     try:
-        infos = socket.getaddrinfo(hostname, None)
+        infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except OSError:
-        return False
+        return None
     for info in infos:
-        ip = info[4][0]
+        candidate = info[4][0].split("%")[0]
         try:
-            addr = ipaddress.ip_address(ip.split("%")[0])
+            addr = ipaddress.ip_address(candidate)
         except ValueError:
-            return False
-        if (addr.is_private or addr.is_loopback or addr.is_link_local
-                or addr.is_multicast or addr.is_reserved or addr.is_unspecified):
-            return False
-    return True
+            continue
+        if _is_public_address(addr):
+            return candidate
+    return None
 
 
-class BoundedRedirectHandler(HTTPRedirectHandler):
-    """Only follow https redirects that resolve to a public host, and cap
-    the redirect chain length (the base class already tracks a visited-url
-    set to reject loops)."""
+class _PinnedHTTPSConnection(HTTPSConnection):
+    """An HTTPSConnection whose TCP connect() targets a caller-supplied
+    literal IP instead of re-resolving self.host, so DNS can't answer
+    differently between the redirect-target check and the actual connect.
+    SNI and certificate hostname verification still use self.host, i.e. the
+    real hostname, so this only pins the transport address."""
 
-    max_redirections = MAX_REDIRECTS
+    def __init__(self, hostname, pinned_ip, port, timeout, context):
+        HTTPSConnection.__init__(self, hostname, port, timeout=timeout, context=context)
+        self._pinned_ip = pinned_ip
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parsed = urlsplit(newurl)
+    def connect(self):
+        sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _fetch_json_pinned(url, deadline):
+    """GETs `url`, following up to MAX_REDIRECTS https redirects, each
+    resolved and connected by pinned IP. Every read is bounded both in size
+    (MAX_RESPONSE_BYTES) and against `deadline`, an absolute wall-clock
+    cutoff for the whole fetch (including all redirects), not just each
+    individual socket operation — so a slow trickle can't hold it open."""
+    context = ssl.create_default_context()
+    for _ in range(MAX_REDIRECTS + 1):
+        parsed = urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname:
             return None
-        if not _is_public_host(parsed.hostname):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return None
-        return HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
+        ip = _resolve_public_ip(parsed.hostname)
+        if ip is None:
+            return None
+        port = parsed.port or 443
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        conn = _PinnedHTTPSConnection(parsed.hostname, ip, port, min(remaining, LOOKUP_TIMEOUT), context)
+        try:
+            conn.request("GET", path, headers={"Accept": "application/json"})
+            resp = conn.getresponse()
+            if resp.status in (301, 302, 303, 307, 308):
+                location = resp.getheader("Location")
+                resp.read(MAX_RESPONSE_BYTES)
+                if not location:
+                    return None
+                url = urljoin(url, location)
+                continue
+            if resp.status != 200:
+                return None
+            body = b""
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                try:
+                    conn.sock.settimeout(remaining)
+                except Exception:
+                    pass
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                body += chunk
+                if len(body) > MAX_RESPONSE_BYTES:
+                    return None
+            return body
+        except Exception:
+            return None
+        finally:
+            conn.close()
+    return None
 
 
-_opener = build_opener(BoundedRedirectHandler())
-
-
-def cache_path():
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-    d = os.path.join(base, "omarchy", "omanetmonitor")
-    os.makedirs(d, exist_ok=True)
-    # This cache records which remote IPs/ports the machine has talked to,
-    # so keep it readable only by the owning user.
-    os.chmod(d, 0o700)
-    return os.path.join(d, "geoip-cache.json")
-
-
-def load_cache(path):
+def lookup_country(ip):
     try:
-        if os.path.getsize(path) > MAX_CACHE_BYTES:
+        deadline = time.monotonic() + LOOKUP_TIMEOUT
+        body = _fetch_json_pinned("https://ipwho.is/%s" % ip, deadline)
+        if body is None:
+            return None
+        data = json.loads(body.decode("utf-8", "replace"))
+        if data.get("success") is False:
+            return None
+        code = _sanitize_country_code(data.get("country_code"))
+        name = _sanitize_country_name(data.get("country"))
+        if not code:
+            return None
+        return {"code": code, "name": name, "ts": time.time()}
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------- cache dir access
+
+def _open_component(parent_fd, name, create_mode=None):
+    """Open exactly one path component under an already-open, verified
+    parent directory fd. Refuses to follow a symlink (O_NOFOLLOW on a
+    single component, not a multi-segment path, so this can't be bypassed
+    by an intermediate symlink), and refuses to reuse anything that isn't a
+    directory owned by us/root with no group/other write bit."""
+    if create_mode is not None:
+        try:
+            os.mkdir(name, create_mode, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+    fd = os.open(name, os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_RDONLY, dir_fd=parent_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            raise PermissionError("not a directory: %r" % name)
+        if st.st_uid not in _TRUSTED_OWNERS:
+            raise PermissionError("untrusted owner for %r" % name)
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise PermissionError("group/other-writable directory: %r" % name)
+        if create_mode is not None:
+            os.fchmod(fd, create_mode)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def open_cache_dir():
+    """Component-wise walk to $XDG_CACHE_HOME/omarchy/omanetmonitor (or
+    ~/.cache/omarchy/omanetmonitor), verifying ownership/type/mode at every
+    hop and refusing to follow a symlink anywhere in the chain. Returns an
+    open fd to the final, verified, 0700 directory; raises on failure,
+    which callers treat the same as any other cache-unavailable case."""
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = xdg if xdg and os.path.isabs(xdg) else os.path.join(os.path.expanduser("~"), ".cache")
+
+    fd = os.open(os.sep, os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in [p for p in base.split(os.sep) if p]:
+            nxt = _open_component(fd, part)
+            os.close(fd)
+            fd = nxt
+        for part, mode in (("omarchy", 0o755), ("omanetmonitor", 0o700)):
+            nxt = _open_component(fd, part, create_mode=mode)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def load_cache_fd(dir_fd):
+    fd = -1
+    try:
+        fd = os.open("geoip-cache.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid not in _TRUSTED_OWNERS:
             return {}
-        with open(path, "r") as f:
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return {}
+        if st.st_size > MAX_CACHE_BYTES:
+            return {}
+        os.set_blocking(fd, True)
+        with os.fdopen(fd, "rb") as f:
+            fd = -1  # fdopen owns the fd now; don't close it again below
             raw = f.read(MAX_CACHE_BYTES + 1)
         if len(raw) > MAX_CACHE_BYTES:
             return {}
-        data = json.loads(raw)
+        data = json.loads(raw.decode("utf-8", "replace"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
 
 
-def save_cache(path, cache):
-    tmp = path + ".tmp"
+def save_cache_fd(dir_fd, cache):
+    if len(cache) > MAX_CACHE_ENTRIES:
+        items = sorted(cache.items(), key=lambda kv: (kv[1].get("ts", 0) if isinstance(kv[1], dict) else 0))
+        cache = dict(items[-MAX_CACHE_ENTRIES:])
+
+    tmp_name = ".geoip-cache.%s.tmp" % secrets.token_hex(8)
+    fd = -1
     try:
-        # Create with 0600 from the start (not chmod-after) so there's no
-        # window where the file is readable with default permissions.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # O_EXCL|O_NOFOLLOW on a randomly chosen name: nothing to race
+        # against, since nothing else could have predicted this name.
+        fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
         with os.fdopen(fd, "w") as f:
+            fd = -1
             json.dump(cache, f)
-        os.replace(tmp, path)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, "geoip-cache.json", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except Exception:
-        pass
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except Exception:
+            pass
+    return cache
 
+
+# ------------------------------------------------------------------- ss scan
 
 def parse_peers():
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["ss", "-Htn", "state", "established"],
-            capture_output=True, text=True, timeout=5, check=False
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=True,  # own process group, so a timeout can kill it and any children cleanly
         )
-        out = proc.stdout
     except Exception:
         return {}
 
-    if len(out) > MAX_SS_OUTPUT_BYTES:
+    deadline = time.monotonic() + SS_TIMEOUT
+    chunks = []
+    total = 0
+    overflow = False
+    stdout_fd = proc.stdout.fileno()
+    os.set_blocking(stdout_fd, False)
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            for _key, _mask in sel.select(timeout=min(remaining, SS_POLL_INTERVAL)):
+                try:
+                    chunk = os.read(stdout_fd, 65536)
+                except (BlockingIOError, OSError):
+                    chunk = b""
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_SS_OUTPUT_BYTES:
+                    overflow = True
+                    break
+                chunks.append(chunk)
+            if overflow:
+                break
+            if proc.poll() is not None:
+                break
+    finally:
+        sel.close()
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+
+    out = b"".join(chunks)
+    if overflow:
         out = out[:MAX_SS_OUTPUT_BYTES]
+    out = out.decode("utf-8", "replace")
 
     counts = {}
     for line in out.splitlines():
@@ -156,40 +406,31 @@ def parse_peers():
             addr = ipaddress.ip_address(ip)
         except ValueError:
             continue
-        if (addr.is_private or addr.is_loopback or addr.is_link_local
-                or addr.is_multicast or addr.is_reserved or addr.is_unspecified):
+        if not _is_public_address(addr):
             continue
         key = (ip, port)
         counts[key] = counts.get(key, 0) + 1
     return counts
 
 
-def lookup_country(ip):
-    try:
-        with _opener.open("https://ipwho.is/%s" % ip, timeout=LOOKUP_TIMEOUT) as resp:
-            raw = resp.read(MAX_RESPONSE_BYTES + 1)
-        if len(raw) > MAX_RESPONSE_BYTES:
-            return None
-        data = json.loads(raw.decode("utf-8", "replace"))
-        if data.get("success") is False:
-            return None
-        code = (data.get("country_code") or "").upper()
-        name = data.get("country") or ""
-        if not code:
-            return None
-        return {"code": code, "name": name, "ts": time.time()}
-    except Exception:
-        return None
-
-
 def main():
     allowed_raw = sys.argv[1] if len(sys.argv) > 1 else "US"
-    allowed = set(c.strip().upper() for c in allowed_raw.split(",") if c.strip())
+    allowed = set()
+    for c in allowed_raw.split(","):
+        code = _sanitize_country_code(c)
+        if code:
+            allowed.add(code)
+        if len(allowed) >= MAX_ALLOWED_CODES:
+            break
     if not allowed:
         allowed = {"US"}
 
-    path = cache_path()
-    cache = load_cache(path)
+    try:
+        cache_dir_fd = open_cache_dir()
+    except Exception:
+        cache_dir_fd = None
+
+    cache = load_cache_fd(cache_dir_fd) if cache_dir_fd is not None else {}
 
     counts = parse_peers()
     ips = sorted(set(ip for ip, _port in counts.keys()))
@@ -206,14 +447,20 @@ def main():
             if res:
                 cache[ip] = res
                 changed = True
-        if changed:
-            save_cache(path, cache)
+        if changed and cache_dir_fd is not None:
+            cache = save_cache_fd(cache_dir_fd, cache)
+
+    if cache_dir_fd is not None:
+        try:
+            os.close(cache_dir_fd)
+        except Exception:
+            pass
 
     entries = []
     for (ip, port), count in counts.items():
         info = cache.get(ip)
-        code = info["code"] if info else ""
-        name = info["name"] if info else "Unknown"
+        code = _sanitize_country_code(info.get("code")) if info else ""
+        name = _sanitize_country_name(info.get("name")) if info else "Unknown"
         flagged = code not in allowed
         entries.append({
             "ip": ip,
@@ -226,15 +473,23 @@ def main():
 
     flagged_entries = [e for e in entries if e["flagged"]]
     flagged_entries.sort(key=lambda e: (-e["count"], e["ip"]))
+    flagged_entries = flagged_entries[:MAX_FLAGGED_ENTRIES]
 
     result = {
         "generatedAt": int(now),
         "totalConnections": sum(counts.values()),
         "totalUniquePeers": len(counts),
         "totalFlagged": len(flagged_entries),
-        "flagged": flagged_entries[:MAX_FLAGGED_ENTRIES],
+        "flagged": flagged_entries,
     }
-    print(json.dumps(result))
+
+    result_json = json.dumps(result)
+    while len(result_json) > MAX_RESULT_BYTES and result["flagged"]:
+        result["flagged"].pop()
+        result["totalFlagged"] = len(result["flagged"])
+        result_json = json.dumps(result)
+
+    print(result_json)
 
 
 if __name__ == "__main__":
