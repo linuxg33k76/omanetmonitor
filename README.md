@@ -4,10 +4,8 @@ Bar plugin that watches your machine's established outbound TCP connections
 and flags any whose remote IP geolocates outside a country/region you allow.
 
 
-![OmaNetMonitor panel open, showing one flagged connection outside the allowed region](preview.png)
 
-
-![OmaNetMonitor panel with the flagged-connections list and CSV export field](image2.png)
+![OmaNetMonitor panel with the flagged-connections list and CSV export field](preview.png)
 
 
 ## Installation
