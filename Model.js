@@ -140,6 +140,21 @@ function buildFlaggedCsv(entries) {
   return lines.join("\n") + "\n"
 }
 
+// Extracts manifest.json's "version" field for display. Bounded/typed like
+// every other cross-process/cross-file input this plugin parses: an
+// oversized or malformed file just yields "" rather than being trusted.
+function parseManifestVersion(text) {
+  var trimmed = String(text || "").trim()
+  if (trimmed === "" || trimmed.length > 65536) return ""
+  try {
+    var data = JSON.parse(trimmed)
+    if (!data || typeof data !== "object" || typeof data.version !== "string") return ""
+    return data.version.substring(0, 40)
+  } catch (error) {
+    return ""
+  }
+}
+
 function timestampSuffix() {
   var d = new Date()
   function pad(n) { return n < 10 ? "0" + n : String(n) }

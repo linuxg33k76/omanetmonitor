@@ -105,6 +105,19 @@ Panel {
 
   readonly property string scanScriptPath: Model.localFilePath(Qt.resolvedUrl("bin/omanetmonitor-scan"))
 
+  // -------------------------------------------------------------- manifest
+
+  readonly property string manifestPath: Model.localFilePath(Qt.resolvedUrl("manifest.json"))
+  property string pluginVersion: ""
+
+  FileView {
+    id: manifestFile
+    path: root.manifestPath
+    printErrors: false
+    onLoaded: root.pluginVersion = Model.parseManifestVersion(text())
+    onLoadFailed: root.pluginVersion = ""
+  }
+
   function runScan() { root.runScanWith(root.allowedCountries.join(",")) }
 
   // Split out so saveSettings() can scan against the just-saved country list
@@ -629,6 +642,17 @@ Panel {
         font.family: root.contentFontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Label.Wrap
+        Layout.fillWidth: true
+      }
+
+      Label {
+        visible: root.pluginVersion !== ""
+        text: "version " + root.pluginVersion
+        textFormat: Text.PlainText
+        color: Qt.darker(root.contentForeground, 2.2)
+        font.family: root.contentFontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
         Layout.fillWidth: true
       }
     }
