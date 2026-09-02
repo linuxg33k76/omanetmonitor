@@ -15,11 +15,13 @@
 import ipaddress
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.request import urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, build_opener
 
 CACHE_TTL = 7 * 24 * 3600
 LOOKUP_TIMEOUT = 2.5
@@ -31,18 +33,71 @@ MAX_WORKERS = 5
 # just keeps a pathological case from producing an unbounded response.
 MAX_FLAGGED_ENTRIES = 500
 
+# Byte ceilings for the three untrusted-size inputs this script reads: a
+# geoip-lookup HTTPS response, `ss`'s stdout, and the on-disk cache file.
+# All are normally tiny; these just stop a pathological/hostile response
+# (or a corrupted cache file) from being read into memory unbounded.
+MAX_RESPONSE_BYTES = 64 * 1024
+MAX_SS_OUTPUT_BYTES = 1024 * 1024
+MAX_CACHE_BYTES = 2 * 1024 * 1024
+MAX_REDIRECTS = 5
+
+
+def _is_public_host(hostname):
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except OSError:
+        return False
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip.split("%")[0])
+        except ValueError:
+            return False
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_reserved or addr.is_unspecified):
+            return False
+    return True
+
+
+class BoundedRedirectHandler(HTTPRedirectHandler):
+    """Only follow https redirects that resolve to a public host, and cap
+    the redirect chain length (the base class already tracks a visited-url
+    set to reject loops)."""
+
+    max_redirections = MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlsplit(newurl)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return None
+        if not _is_public_host(parsed.hostname):
+            return None
+        return HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
+
+
+_opener = build_opener(BoundedRedirectHandler())
+
 
 def cache_path():
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     d = os.path.join(base, "omarchy", "omanetmonitor")
     os.makedirs(d, exist_ok=True)
+    # This cache records which remote IPs/ports the machine has talked to,
+    # so keep it readable only by the owning user.
+    os.chmod(d, 0o700)
     return os.path.join(d, "geoip-cache.json")
 
 
 def load_cache(path):
     try:
+        if os.path.getsize(path) > MAX_CACHE_BYTES:
+            return {}
         with open(path, "r") as f:
-            data = json.load(f)
+            raw = f.read(MAX_CACHE_BYTES + 1)
+        if len(raw) > MAX_CACHE_BYTES:
+            return {}
+        data = json.loads(raw)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -51,7 +106,10 @@ def load_cache(path):
 def save_cache(path, cache):
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w") as f:
+        # Create with 0600 from the start (not chmod-after) so there's no
+        # window where the file is readable with default permissions.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(cache, f)
         os.replace(tmp, path)
     except Exception:
@@ -67,6 +125,9 @@ def parse_peers():
         out = proc.stdout
     except Exception:
         return {}
+
+    if len(out) > MAX_SS_OUTPUT_BYTES:
+        out = out[:MAX_SS_OUTPUT_BYTES]
 
     counts = {}
     for line in out.splitlines():
@@ -105,8 +166,11 @@ def parse_peers():
 
 def lookup_country(ip):
     try:
-        with urlopen("https://ipwho.is/%s" % ip, timeout=LOOKUP_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
+        with _opener.open("https://ipwho.is/%s" % ip, timeout=LOOKUP_TIMEOUT) as resp:
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            return None
+        data = json.loads(raw.decode("utf-8", "replace"))
         if data.get("success") is False:
             return None
         code = (data.get("country_code") or "").upper()
