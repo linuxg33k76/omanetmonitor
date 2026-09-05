@@ -75,7 +75,9 @@ SS_POLL_INTERVAL = 0.2
 
 MAX_COUNTRY_NAME_LEN = 100
 MAX_ALLOWED_CODES = 50
+MAX_ALLOWED_RAW_LEN = 2000
 MAX_CACHE_ENTRIES = 2000
+MAX_CACHE_TS_SKEW = 60  # tolerate a little clock skew, not an arbitrary future date
 COUNTRY_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
 # Directory/file components in the cache path are only trusted if owned by
@@ -122,6 +124,8 @@ def _sanitize_cache(cache):
             continue
         ts = value.get("ts")
         if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts) or ts < 0:
+            continue
+        if ts > time.time() + MAX_CACHE_TS_SKEW:
             continue
         out[key] = {"code": code, "name": _sanitize_country_name(value.get("name")), "ts": float(ts)}
     return out
@@ -479,6 +483,7 @@ def parse_peers():
 
 def main():
     allowed_raw = sys.argv[1] if len(sys.argv) > 1 else "US"
+    allowed_raw = allowed_raw[:MAX_ALLOWED_RAW_LEN]
     allowed = set()
     for c in allowed_raw.split(","):
         code = _sanitize_country_code(c)
